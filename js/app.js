@@ -34,6 +34,8 @@ const STAGES = window.STAGES;
 const LS_KEY = "deutsch_a11_progress_v1";
 const DEFAULT_STATE = {
   theme: "light",
+  voice: "",
+  phon: true,
   vocab: {},      // "de" -> not|reviewing|memorized|practice
   grammar: {},    // id -> done
   lessons: {},    // id -> done
@@ -67,6 +69,15 @@ function esc(s) {
 function de(s) { return '<span class="de">' + esc(s) + '</span>'; }
 /* rich(): gibt bereits geprüftes Autoren-HTML unverändert aus (z. B. <b>…</b> in Merksätzen) */
 function rich(html) { return String(html == null ? "" : html); }
+/* phon(): arabische Lautschrift (تقريبي) */
+function phon(w) {
+  try { return window.germanToArabic ? window.germanToArabic(w) : ""; } catch (e) { return ""; }
+}
+function phonLine(w) {
+  if (S.phon === false) return "";
+  const p = phon(w);
+  return p ? `<div class="ph">${esc(p)}</div>` : "";
+}
 function shuffle(a) {
   const arr = a.slice();
   for (let i = arr.length - 1; i > 0; i--) {
@@ -104,16 +115,133 @@ function chiClass(c) { return c === "der" ? "a-der" : c === "die" ? "a-die" : "a
 function pct(a, b) { return b ? Math.round((a / b) * 100) : 0; }
 
 /* ----------------------------- Aussprache (Web Speech API) ----------------------------- */
-function speak(text) {
-  if (!("speechSynthesis" in window)) { toast("النطق مش مدعوم في المتصفح ده"); return; }
+let VOICES = [];
+let voiceWarned = false;
+
+function refreshVoices() {
   try {
-    window.speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = "de-DE";
-    u.rate = 0.88;
-    window.speechSynthesis.speak(u);
-  } catch (e) { toast("مش قادر أشغّل الصوت"); }
+    VOICES = (window.speechSynthesis && window.speechSynthesis.getVoices()) || [];
+  } catch (e) { VOICES = []; }
+  return VOICES;
 }
+if (window.speechSynthesis) {
+  refreshVoices();
+  window.speechSynthesis.onvoiceschanged = refreshVoices;
+}
+
+function germanVoices() {
+  if (!VOICES.length) refreshVoices();
+  return VOICES.filter(function (v) { return /^de/i.test(v.lang || ""); });
+}
+
+/* Hinweisbanner, wenn kein deutscher Sprecher installiert ist */
+function voiceBanner() {
+  if (!("speechSynthesis" in window)) return "";
+  if (germanVoices().length) return "";
+  return `<div class="card mb" style="border-inline-start:4px solid var(--warn);background:var(--warn-soft)">
+    <b>⚠️ مفيش صوت ألماني متثبت على الجهاز</b>
+    <div class="small mt">الصوت اللي بتسمعه دلوقتي بيقرا الألماني بلكنة إنجليزية، فالطريقة الصح إنك تثبّت صوت <b>Deutsch (de-DE)</b>:
+      <br>• <b>ويندوز:</b> Settings → Time &amp; language → Language &amp; region → Add a language → Deutsch → علّم على <b>Speech</b>.
+      <br>• <b>أندرويد:</b> Settings → System → Languages &amp; input → Text-to-speech → ثبّت German.
+      <br>وبعدها اعمل Refresh للصفحة.</div>
+    <div class="row mt"><button class="btn sm" id="openVoice">🗣️ إعدادات النطق</button>
+      <span class="small muted">وفي كل الأحوال: النطق العربي التقريبي تحت كل كلمة.</span></div>
+  </div>`;
+}
+function bindVoiceBanner(root) {
+  const b = $("#openVoice", root);
+  if (b) b.addEventListener("click", voiceModal);
+}
+
+function activeVoice() {
+  if (S.voice) {
+    const chosen = VOICES.filter(function (v) { return v.name === S.voice; })[0];
+    if (chosen) return chosen;
+  }
+  const de = germanVoices();
+  if (!de.length) return null;
+  return de.filter(function (v) { return /^de[-_]DE/i.test(v.lang); })[0] || de[0];
+}
+
+function speak(text) {
+  if (!("speechSynthesis" in window)) { toast("المتصفح ده مش بيدعم النطق"); return; }
+  const synth = window.speechSynthesis;
+  if (!VOICES.length) refreshVoices();
+  const de = germanVoices();
+  const v = activeVoice();
+  try {
+    synth.cancel();
+    const u = new SpeechSynthesisUtterance(String(text));
+    u.lang = v ? v.lang : "de-DE";
+    if (v) u.voice = v;
+    u.rate = 0.85;
+    synth.speak(u);
+  } catch (e) { toast("مش قادر أشغّل الصوت"); }
+  if (!de.length && !voiceWarned) {
+    voiceWarned = true;
+    toast("⚠️ مفيش صوت ألماني على الجهاز — اضغط 🗣️ لفوق");
+  }
+}
+
+/* إعدادات الصوت */
+function voiceModal() {
+  refreshVoices();
+  const de = germanVoices();
+  const cur = activeVoice();
+  const others = VOICES.filter(function (v) { return !/^de/i.test(v.lang || ""); });
+  openModal(`
+    <h3>🗣️ إعدادات النطق</h3>
+    <p class="small muted">الموقع بيستخدم صوت الجهاز. لو الكلمات بتتقرا بإنجليزي، يبقى مفيش صوت ألماني متثبت (أو مش متحدد).</p>
+    ${de.length
+      ? `<div class="mb"><label class="small muted">اختار الصوت الألماني (${de.length})</label>
+          <select id="voiceSel" class="chip" style="width:100%;padding:9px">
+            ${de.map(function (v) {
+              return `<option value="${esc(v.name)}" ${cur && cur.name === v.name ? "selected" : ""}>${esc(v.name)} (${esc(v.lang)})</option>`;
+            }).join("")}
+          </select></div>`
+      : `<div class="tipbox mb">⚠️ مفيش صوت ألماني (de-DE) على الجهاز.<br>
+          <b>ويندوز:</b> Settings → Time &amp; language → Language &amp; region → Add a language → Deutsch → علّم على <b>Speech</b> ثم أعد تشغيل المتصفح.<br>
+          <b>أندرويد:</b> Settings → System → Languages → Text-to-speech → ثبّت German.<br>
+          لحد ما تثبته، استخدم «النطق التقريبي بالعربي» اللي تحت كل كلمة.</div>`}
+    ${others.length ? `<div class="mb"><label class="small muted">أو اختار أي صوت تاني</label>
+      <select id="voiceOther" class="chip" style="width:100%;padding:9px">
+        <option value="">— تلقائي —</option>
+        ${others.map(function (v) { return `<option value="${esc(v.name)}">${esc(v.name)} (${esc(v.lang)})</option>`; }).join("")}
+      </select></div>` : ""}
+    <div class="row mt">
+      <button class="btn" id="vTest">🔊 جرّب: Guten Tag!</button>
+      <button class="btn ghost" id="vClose">إغلاق</button>
+    </div>
+    <div class="mt row">
+      <label class="small"><input type="checkbox" id="phonChk" ${S.phon === false ? "" : "checked"}> إظهار النطق التقريبي بالعربي</label>
+    </div>
+    <p class="tiny muted mt">ملاحظة: النطق العربي تقريبي للمساعدة فقط، والنطق الصحيح هو الصوت أو IPA.</p>`);
+
+  if ($("#voiceSel")) {
+    $("#voiceSel").addEventListener("change", function (e) {
+      S.voice = e.target.value; save(); toast("تم اختيار الصوت: " + e.target.value);
+      speak("Guten Tag!");
+    });
+  }
+  if ($("#voiceOther")) {
+    $("#voiceOther").addEventListener("change", function (e) {
+      S.voice = e.target.value; save(); speak("Guten Tag!");
+    });
+  }
+  $("#vTest").addEventListener("click", function () { speak("Guten Tag! Ich heiße Nady und lerne Deutsch."); });
+  $("#vClose").addEventListener("click", closeModal);
+  $("#phonChk").addEventListener("change", function (e) {
+    S.phon = e.target.checked; save();
+    toast(e.target.checked ? "النطق العربي ظاهر" : "النطق العربي اتخفي");
+    render(currentView, parseHash().param);
+  });
+}
+
+/* Klick auf jedes 🔊-Symbol */
+document.addEventListener("click", function (e) {
+  const b = e.target.closest ? e.target.closest("[data-say]") : null;
+  if (b) { e.stopPropagation(); speak(b.getAttribute("data-say")); }
+});
 
 /* ----------------------------- Fortschritt ----------------------------- */
 function vocabStatus(deWord) { return S.vocab[deWord] || "not"; }
@@ -172,6 +300,7 @@ function applyTheme(t) {
 $("#themeBtn").addEventListener("click", function () {
   applyTheme(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark");
 });
+$("#voiceBtn").addEventListener("click", voiceModal);
 
 /* ----------------------------- Router ----------------------------- */
 const routes = {};
@@ -190,7 +319,7 @@ function parseHash() {
 window.addEventListener("hashchange", function () {
   const p = parseHash();
   render(p.view, p.param);
-  $("#sidebar").classList.remove("open");
+  setSidebar(false);
 });
 
 function setActiveNav(view) {
@@ -209,10 +338,36 @@ function render(view, param) {
   window.scrollTo(0, 0);
 }
 
+function setSidebar(open) {
+  const sb = $("#sidebar"), sc = $("#scrim"), bd = document.body;
+  if (!sb) return;
+  if (open) {
+    sb.classList.add("open");
+    if (sc) sc.classList.add("show");
+    bd.classList.add("noscroll");
+  } else {
+    sb.classList.remove("open");
+    if (sc) sc.classList.remove("show");
+    bd.classList.remove("noscroll");
+  }
+}
+
 $$(".nav-btn").forEach(function (b) {
-  b.addEventListener("click", function () { go(b.getAttribute("data-view")); });
+  b.addEventListener("click", function () {
+    setSidebar(false);
+    go(b.getAttribute("data-view"));
+  });
 });
-$("#menuBtn").addEventListener("click", function () { $("#sidebar").classList.toggle("open"); });
+$("#menuBtn").addEventListener("click", function () {
+  setSidebar(!$("#sidebar").classList.contains("open"));
+});
+if ($("#scrim")) $("#scrim").addEventListener("click", function () { setSidebar(false); });
+document.addEventListener("keydown", function (e) {
+  if (e.key === "Escape") { setSidebar(false); closeModal(); }
+});
+window.addEventListener("resize", function () {
+  if (window.innerWidth > 820) setSidebar(false);
+});
 
 /* ==========================================================================
    VIEWS
@@ -386,7 +541,7 @@ routes.lesson = function (root, id) {
   <h3>أمثلة مع الترجمة</h3>
   <div class="card mb">
     ${l.examples.map(function (e) {
-      return `<div class="ex-card"><div class="de">${esc(e.de)}</div><div class="ar">${esc(e.ar)}</div></div>`;
+      return `<div class="ex-card"><div class="de">${esc(e.de)} <button class="spk" data-say="${esc(e.de)}" title="اسمع">🔊</button></div><div class="ar">${esc(e.ar)}</div></div>`;
     }).join("")}
   </div>
 
@@ -475,6 +630,7 @@ routes.vocab = function (root) {
     <h1>🗂️ القاموس الكامل</h1>
     <p>${VOCAB.length} كلمة — كل اسم معاه أداته (der/die/das) وجمعه ومعناه بالمصري وجملة مثال مترجمة.</p>
   </div>
+  ${voiceBanner()}
   <div class="vocab-controls">
     <input id="vq" class="chip" style="min-width:220px;padding:8px 14px" placeholder="🔍 ابحث… (ألماني أو عربي)" value="${esc(vFilter.q)}">
     <button class="chip ${vFilter.art === "all" ? "active" : ""}" data-art="all">الكل</button>
@@ -521,14 +677,15 @@ routes.vocab = function (root) {
       const st = vocabStatus(v.de);
       const ico = st === "memorized" ? "✓" : st === "reviewing" ? "👁" : st === "practice" ? "!" : "";
       return `<tr data-w="${esc(v.de)}">
-        <td><button class="vstatus ${st === "not" ? "" : st}" title="حالة الحفظ">${ico}</button></td>
-        <td><span class="word-de">${esc(v.de)}</span>
-          ${v.art === "-" ? "" : `<button class="spk" data-say="${esc(v.art + " " + v.de)}" title="اسمع النطق">🔊</button>`}</td>
-        <td><span class="${artClass(v.art)}">${v.art === "-" ? "—" : esc(v.art)}</span></td>
-        <td><span class="meaning">${esc(v.ar)}</span></td>
-        <td><span class="pl-de">${esc(v.pl)}</span></td>
-        <td><button class="reveal-btn">جملة</button>
-          <div class="ex-sentence">${esc(v.ex)}<div class="ex-ar">${esc(v.exAr)}</div></div>
+        <td class="c-st"><button class="vstatus ${st === "not" ? "" : st}" title="حالة الحفظ">${ico}</button></td>
+        <td class="c-w"><span class="word-de">${esc(v.de)}</span>
+          <button class="spk" data-say="${esc((v.art === "-" ? "" : v.art + " ") + v.de)}" title="اسمع النطق">🔊</button>
+          ${phonLine(v.de)}</td>
+        <td class="c-a"><span class="${artClass(v.art)}">${v.art === "-" ? "—" : esc(v.art)}</span></td>
+        <td class="c-m"><span class="meaning">${esc(v.ar)}</span></td>
+        <td class="c-p"><span class="pl-de">${esc(v.pl)}</span></td>
+        <td class="c-e"><button class="reveal-btn">جملة</button>
+          <div class="ex-sentence">${esc(v.ex)} <button class="spk" data-say="${esc(v.ex)}" title="اسمع">🔊</button><div class="ex-ar">${esc(v.exAr)}</div></div>
         </td>
       </tr>`;
     }).join("") || '<tr><td colspan="6" class="center muted" style="padding:30px">مفيش نتائج — جرّب بحث تاني</td></tr>';
@@ -568,6 +725,7 @@ routes.vocab = function (root) {
   });
   $("#vch").addEventListener("change", function (e) { vFilter.ch = e.target.value; draw(); });
   $("#vcat").addEventListener("change", function (e) { vFilter.cat = e.target.value; draw(); });
+  bindVoiceBanner(root);
   draw();
 };
 
@@ -598,7 +756,7 @@ routes.artikel = function (root) {
         <div class="muted small">اختار الأداة الصح</div>
         <div style="font-family:var(--ff-de);font-size:2.1rem;font-weight:800;direction:ltr">${esc(cur.de)}</div>
       </div>
-      <div class="opts" style="grid-template-columns:repeat(3,1fr);display:grid">
+      <div class="opts" style="grid-template-columns:repeat(3,minmax(0,1fr));display:grid;gap:8px">
         <button class="opt" data-a="der" style="justify-content:center"><span class="idx">1</span> der</button>
         <button class="opt" data-a="die" style="justify-content:center"><span class="idx">2</span> die</button>
         <button class="opt" data-a="das" style="justify-content:center"><span class="idx">3</span> das</button>
@@ -629,6 +787,7 @@ routes.artikel = function (root) {
         fb.className = "feedback show " + (ok ? "ok" : "bad");
         fb.innerHTML = `${ok ? "✅ عاش! " : "❌ الأداة الصح: <b>" + cur.art + "</b> — "}
           <b>${cur.art} ${esc(cur.de)}</b> = ${esc(cur.ar)}
+          ${S.phon === false ? "" : `<div class="ph" style="margin-top:4px">${esc(phon(cur.de))}</div>`}
           <div class="small mt">الجمع: <span class="de">${esc(cur.pl)}</span>${cur.ex ? ` · <span class="de">${esc(cur.ex)}</span>` : ""}</div>`;
 
         setTimeout(function () { if ($("#artBox")) next(); }, ok ? 1100 : 2400);
@@ -671,7 +830,7 @@ routes.verbs = function (root) {
             return `<tr><td class="muted" style="width:90px">${PRON[i]}</td><td><b class="de">${esc(f)}</b></td></tr>`;
           }).join("")}
         </table>
-        <div class="ex-card"><div class="de">${esc(v.ex)}</div><div class="ar">${esc(v.exAr)}</div></div>
+        <div class="ex-card"><div class="de">${esc(v.ex)} <button class="spk" data-say="${esc(v.ex)}" title="اسمع">🔊</button></div><div class="ar">${esc(v.exAr)}</div></div>
         ${v.note ? `<div class="tipbox small">💡 ${esc(v.note)}</div>` : ""}
       </div>`;
     }).join("") || '<p class="muted">مفيش نتائج</p>';
@@ -731,7 +890,9 @@ routes.grammar = function (root, param) {
         }).join("")}</tbody></table></div>`;
     }).join("")}
     <div class="card mb"><h3>📌 أمثلة</h3>
-      ${g.examples.map(function (e) { return `<div class="ex-card"><div class="de">${esc(e.de)}</div><div class="ar">${esc(e.ar)}</div></div>`; }).join("")}
+      ${g.examples.map(function (e) {
+        return `<div class="ex-card"><div class="de">${esc(e.de)} <button class="spk" data-say="${esc(e.de)}" title="اسمع">🔊</button></div><div class="ar">${esc(e.ar)}</div></div>`;
+      }).join("")}
     </div>
     <div class="card mb"><h3>⚠️ أخطاء شائعة</h3>
       ${g.mistakes.map(function (m) {
@@ -1186,8 +1347,9 @@ routes.flash = function (root) {
     <h1>🃏 فلاش كاردز</h1>
     <p>اضغط على الكارت تشوف المعنى. علّم اللي حفظته عشان يتحسب في تقدّمك.</p>
   </div>
+  ${voiceBanner()}
   <div class="flash" id="flashCard"><div class="flash-inner">
-    <div class="flash-face flash-front"><div class="tiny" style="opacity:.8">اضغط للترجمة</div><div class="fw" id="fFront"></div><div class="tiny" style="opacity:.8" id="fArt"></div></div>
+    <div class="flash-face flash-front"><div class="tiny" style="opacity:.8">اضغط للترجمة</div><div class="fw" id="fFront"></div><div class="tiny" style="opacity:.85" id="fArt"></div><div class="tiny" style="opacity:.75;margin-top:6px" id="fPhon"></div></div>
     <div class="flash-face flash-back"><div class="fm" id="fBack"></div><div class="fe" id="fEx"></div></div>
   </div></div>
   <div class="row center" style="justify-content:center">
@@ -1203,6 +1365,7 @@ routes.flash = function (root) {
     const v = pool[i % pool.length];
     $("#fFront").textContent = v.de;
     $("#fArt").textContent = v.art === "-" ? "" : v.art;
+    $("#fPhon").textContent = S.phon === false ? "" : phon(v.de);
     $("#fBack").textContent = v.ar;
     $("#fEx").textContent = (v.art === "-" ? "" : v.art + " ") + v.de + (v.pl && v.pl !== "-" ? " · Plural: " + v.pl : "") + (v.ex ? " — " + v.ex : "");
     $("#fCount").textContent = `كارت ${(i % pool.length) + 1} من ${pool.length} · حفظت ${known}`;
@@ -1230,6 +1393,7 @@ routes.flash = function (root) {
     setVocabStatus(v.de, "practice"); recordAnswer(false, "flash-" + v.de);
     i++; draw();
   });
+  bindVoiceBanner(root);
   draw();
 };
 
